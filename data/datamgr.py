@@ -67,12 +67,12 @@ class SimpleDataManager(DataManager):
         return data_loader
 
 class SetDataManager(DataManager):
-    def __init__(self, image_size, n_way, n_support, n_query, n_eposide =100):        
+    def __init__(self, image_size, n_way, n_support, n_query, n_episode =100):        
         super(SetDataManager, self).__init__()
         self.image_size = image_size
         self.n_way = n_way
         self.batch_size = n_support + n_query
-        self.n_eposide = n_eposide
+        self.n_episode = n_episode
 
         self.trans_loader = TransformLoader(image_size)
 
@@ -83,7 +83,7 @@ class SetDataManager(DataManager):
         else:
             normal_transform = None
         dataset = SetDataset( data_file , self.batch_size, transform , normal_transform=normal_transform, support_aug=is_support_aug, support_aug_num=aug_num)
-        sampler = EpisodicBatchSampler(len(dataset), self.n_way, self.n_eposide )  
+        sampler = EpisodicBatchSampler(len(dataset), self.n_way, self.n_episode )  
         data_loader_params = dict(batch_sampler = sampler,  num_workers = 12, pin_memory = True)       
         data_loader = torch.utils.data.DataLoader(dataset, **data_loader_params)
         return data_loader

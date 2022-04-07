@@ -1,3 +1,4 @@
+from numpy.core.fromnumeric import mean
 import torch
 import numpy as np
 from torch.autograd import Variable
@@ -21,6 +22,7 @@ from methods.protonet import ProtoNet
 from methods.matchingnet import MatchingNet
 from methods.relationnet import RelationNet
 from methods.maml import MAML
+from methods import meta_test_preprocess
 from tqdm import tqdm
 from io_utils import model_dict, parse_args, get_resume_file, get_best_file, get_assigned_file
 
@@ -37,6 +39,8 @@ def feature_evaluation(cl_data_file, model, n_way=5, n_support=5, n_query=15, ad
                       for i in range(n_support+n_query)])     # stack each batch
 
     z_all = np.array(z_all)
+    # print(z_all.shape)
+    # sfa
 
     if mean_feature is not None:
         z_all = z_all - mean_feature[None, None, :]
@@ -51,6 +55,13 @@ def feature_evaluation(cl_data_file, model, n_way=5, n_support=5, n_query=15, ad
     else:
         scores = model.set_forward(z_all, is_feature=True)
     pred = scores.data.cpu().numpy().argmax(axis=1)
+    if scores.shape[1] > n_way:
+        n_prototype = scores.shape[1] // n_way
+        assert n_way * n_prototype == scores.shape[1], (scores.shape, n_way)
+        pred_label = np.repeat(np.arange(n_way), n_prototype)
+        # assert scores.shape[1] == n_way * n_support, (n_way, n_support, scores.shape)
+        # pred = pred // n_support
+        pred = pred_label[pred]
     y = np.repeat(range(n_way), n_query)
     # print(pred)
     # print(y)
@@ -61,6 +72,8 @@ def feature_evaluation(cl_data_file, model, n_way=5, n_support=5, n_query=15, ad
 
 if __name__ == '__main__':
     params = parse_args('test')
+
+    # if "force_l2" in params
 
     acc_all = []
 
@@ -85,6 +98,8 @@ if __name__ == '__main__':
             del_last_relu=params.del_last_relu,
             output_dim=params.output_dim,
             subtract_mean=params.subtract_mean,
+            lr=params.test_lr,
+            epoch=params.test_epoch,
             **few_shot_params)
     elif params.method == 'baseline++' and not params.test_as_protonet:
         if params.loss_type == "no":
@@ -97,7 +112,9 @@ if __name__ == '__main__':
             model_dict[params.model], 
             normalize_method=params.normalize_method, 
             subtract_mean=params.subtract_mean,
-            loss_type=loss_type, 
+            loss_type=loss_type,
+            lr=params.test_lr,
+            epoch=params.test_epoch,
             **few_shot_params)
     elif params.method == 'protonet' or params.test_as_protonet:
         model = ProtoNet(model_dict[params.model],
@@ -153,6 +170,13 @@ if __name__ == '__main__':
     params.checkpoint_dir = '%s/checkpoints/%s/%s_%s_%s_%s' % (
         configs.save_dir, params.dataset, params.model, del_relu_name, params.method, str(params.output_dim))
 
+    if params.add_final_layer:
+        final_layer_name = "-add_final_layer"
+
+    else:
+        final_layer_name = ""
+    params.checkpoint_dir += final_layer_name
+
     checkpoint_dir = params.checkpoint_dir
 
     if params.train_aug:
@@ -167,6 +191,7 @@ if __name__ == '__main__':
             modelfile = get_assigned_file(checkpoint_dir, params.save_iter)
         else:
             modelfile = get_best_file(checkpoint_dir)
+        # print("model file:", modelfile)
         if modelfile is not None:
             tmp = torch.load(modelfile)
             # print(tmp.keys())
@@ -239,6 +264,10 @@ if __name__ == '__main__':
         if params.del_last_relu:
             novel_file = novel_file.replace(".hdf5", "_del_last_relu.hdf5")
 
+
+        # print("novel file:", novel_file)
+        # print("checkpoint dir:", checkpoint_dir)
+
         if params.save_iter != -1:
             modelfile = get_assigned_file(checkpoint_dir, params.save_iter)
     #    elif params.method in ['baseline', 'baseline++'] :
@@ -252,32 +281,99 @@ if __name__ == '__main__':
             else:
                 modelfile = get_best_file(checkpoint_dir)
 
+        print("novel file:", novel_file)
+        if "best" not in novel_file and params.save_iter == -1 and "best" not in modelfile:
+            novel_file = novel_file.replace(".hdf5", "_best_model.hdf5")
+
         if os.path.exists(novel_file) is False:
+            print("model file:", modelfile)
             file_stem = pathlib.Path(modelfile).stem
             novel_file = novel_file.replace(
                 ".hdf5", "_{}.hdf5".format(file_stem))
 
+        if os.path.exists(novel_file) is False and params.add_final_layer:
+            novel_file = novel_file.replace(
+                f"{split}", "{}-add_final_layer".format(split))
+
+        print("load feature from", novel_file)
         cl_data_file = feat_loader.init_loader(novel_file)
+
+        if "force_l2" in params.normalize_method:
+            cl_data_file = meta_test_preprocess.l2_normalize_all(
+                cl_data_file=cl_data_file
+            )
+
+        if "force_z_score" in params.normalize_method:
+            cl_data_file = meta_test_preprocess.zscore_normalize_all(
+                cl_data_file=cl_data_file
+            )
 
         # print(novel_file)
         # sdfa
-        if params.subtract_mean:
-            all_feature_list = []
-            for label, feature_list in cl_data_file.items():
-                feature_list = np.array(feature_list)
-                all_feature_list.append(feature_list)
-
-            all_feature_list = np.array(all_feature_list)
-            n_class, n_support, dim = all_feature_list.shape
-
-            all_feature_list = all_feature_list.reshape(n_class*n_support, dim)
-            mean_feature = np.mean(all_feature_list, axis=0)
-            mean_feature_norm = np.sqrt(np.sum(mean_feature*mean_feature))
+        if params.subtract_mean and "est_beforehand" not in params.normalize_method:
+        # if params.subtract_mean:
+            base_file = novel_file.replace("novel", "base")
+            cl_data_file_base = feat_loader.init_loader(base_file)
+            mean_feature = meta_test_preprocess.calc_center_point(
+                feature_info=cl_data_file_base,
+                method=params.subtract_mean_method
+            )
+            mean_feature = mean_feature[0]
+            # mean_feature = None
+            # print(mean_feature.shape)
+            # sfad
             # print(mean_feature_norm)
-            # sdfa
-
         else:
             mean_feature = None
+            # sdfa
+        if params.adjust_to_mean_norm:
+            cl_data_file = meta_test_preprocess.adjust_to_class_mean_norm(
+                cl_data_file=cl_data_file
+            )
+
+        if params.normalize_method == "minimize_variance_of_norm_by_trace":
+            base_file = novel_file.replace("novel", "base")
+            cl_data_file_base = feat_loader.init_loader(base_file)
+
+            cl_data_file = meta_test_preprocess.minimize_variance_beforehand(
+                base_features=cl_data_file_base,
+                novel_features=cl_data_file
+            )
+
+        elif "est_beforehand" in params.normalize_method:
+            base_file = novel_file.replace("novel", "base")
+            print("load base from", base_file)
+            cl_data_file_base = feat_loader.init_loader(base_file)
+
+            if "force_l2" in params.normalize_method:
+                cl_data_file_base = meta_test_preprocess.l2_normalize_all(
+                    cl_data_file=cl_data_file_base
+                )
+                
+            if "force_z_score" in params.normalize_method:
+                cl_data_file_base = meta_test_preprocess.zscore_normalize_all(
+                    cl_data_file=cl_data_file_base
+                )
+            # if "l2" in params.normalize_method:
+            #     cl_data_file_base = meta_test_preprocess.l2_normalize_all(
+            #         cl_data_file=cl_data_file_base
+            #     )
+
+            cl_data_file, cl_data_file_base = meta_test_preprocess.est_beforehand(
+                base_features=cl_data_file_base,
+                novel_features=cl_data_file
+            )
+
+            if params.subtract_mean:
+                base_file = novel_file.replace("novel", "base")
+            #     # cl_data_file_base = feat_loader.init_loader(base_file)
+                mean_feature = meta_test_preprocess.calc_center_point(
+                    feature_info=cl_data_file_base,
+                    method=params.subtract_mean_method
+                )
+                mean_feature = mean_feature[0]
+                # print(mean_feature.shape)
+                # sfda
 
         for i in tqdm(range(iter_num)):
             acc = feature_evaluation(
@@ -291,7 +387,10 @@ if __name__ == '__main__':
         acc_std = np.std(acc_all)
         print('%d Test Acc = %4.2f%% +- %4.2f%%' %
               (iter_num, acc_mean, 1.96 * acc_std/np.sqrt(iter_num)))
-    with open('./record/results.txt', 'a') as f:
+
+    save_record_dir = f"./record/{params.dataset}"
+    os.makedirs(save_record_dir, exist_ok=True)
+    with open(f'{save_record_dir}/results.txt', 'a') as f:
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         aug_str = '-aug' if params.train_aug else ''
         if params.support_aug:
@@ -305,6 +404,10 @@ if __name__ == '__main__':
         aug_str += "-loss:{}".format(params.loss_type)
 
         aug_str += "-subtract_mean:{}".format(params.subtract_mean)
+        if params.subtract_mean:
+            aug_str += "-mean_method:{}".format(params.subtract_mean_method)
+
+        aug_str += "-adjust_mean_norm:{}".format(params.adjust_to_mean_norm)
         # if params.normalize_feature:
         aug_str += "-normalize:{}".format(params.normalize_method)
         aug_str += "-normvec:{}".format(params.normalize_vector)
@@ -312,7 +415,16 @@ if __name__ == '__main__':
 
         aug_str += "-dim:{}".format(params.output_dim)
 
+        if params.add_final_layer:
+            aug_str += "-add_final_layer"
+
+        else:
+            aug_str += "-normal_final_layer"
         aug_str += '-adapted' if params.adaptation else ''
+
+        hyperparameter_str = f"-test_lr:{params.test_lr}-test_epoch:{params.test_epoch}"
+        aug_str += hyperparameter_str
+
         if params.method in ['baseline', 'baseline++']:
             exp_setting = '%s-%s-%s-%s%s %sshot %sway_test' % (
                 params.dataset, split_str, params.model, params.method, aug_str, params.n_shot, params.test_n_way)

@@ -10,9 +10,9 @@ from tqdm import tqdm
 
 
 class BaselineTrain(nn.Module):
-    def __init__(self, model_func, num_class, loss_type='softmax', debug=False, del_last_relu=False, output_dim=512):
+    def __init__(self, model_func, num_class, loss_type='softmax', debug=False, del_last_relu=False, output_dim=512, add_final_layer=False):
         super(BaselineTrain, self).__init__()
-        self.feature = model_func(del_last_relu=del_last_relu, output_dim=output_dim)
+        self.feature = model_func(del_last_relu=del_last_relu, output_dim=output_dim, add_final_layer=add_final_layer)
         if loss_type == 'softmax':
             self.classifier = nn.Linear(self.feature.final_feat_dim, num_class)
             self.classifier.bias.data.fill_(0)
@@ -27,9 +27,12 @@ class BaselineTrain(nn.Module):
 
     def forward(self, x):
         x = x.cuda()
+        # print(x.shape, "in shape")
         out = self.feature.forward(x)
+        # print(out.shape, "out shape")
         # print(out.shape)
-        # print(out.shape)
+        # print(self.classifier)
+
         scores = self.classifier.forward(out)
         return scores
 

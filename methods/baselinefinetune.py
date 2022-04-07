@@ -10,7 +10,7 @@ from methods.meta_template import MetaTemplate
 
 
 class BaselineFinetune(MetaTemplate):
-    def __init__(self, model_func,  n_way, n_support, loss_type="softmax", normalize_method="no", del_last_relu=False, output_dim=512, subtract_mean=False):
+    def __init__(self, model_func,  n_way, n_support, loss_type="softmax", normalize_method="no", del_last_relu=False, output_dim=512, subtract_mean=False, lr=0.01, epoch=100):
         super(BaselineFinetune, self).__init__(
             model_func,  n_way, n_support, 
             normalize_method=normalize_method, 
@@ -19,6 +19,8 @@ class BaselineFinetune(MetaTemplate):
             subtract_mean=subtract_mean
             )
         self.loss_type = loss_type
+        self.lr = lr
+        self.epoch = epoch
 
     def set_forward(self, x, is_feature=True, is_cuda=False, normalize_feature=False):
         # Baseline always do adaptation
@@ -57,7 +59,7 @@ class BaselineFinetune(MetaTemplate):
         linear_clf = linear_clf.to(device)
 
         set_optimizer = torch.optim.SGD(linear_clf.parameters(
-        ), lr=0.01, momentum=0.9, dampening=0.9, weight_decay=0.001)
+        ), lr=self.lr, momentum=0.9, dampening=0.9, weight_decay=0.0001)
 
         loss_function = nn.CrossEntropyLoss()
         # loss_function = loss_function.cuda()
@@ -68,7 +70,7 @@ class BaselineFinetune(MetaTemplate):
 
         batch_size = 4
         support_size = self.n_way * self.n_support * self.support_aug_num
-        for epoch in range(100):
+        for epoch in range(self.epoch):
             # rand_id = np.random.permutation(support_size)
             rand_id = torch.randperm(support_size, device=device)
             for i in range(0, support_size, batch_size):

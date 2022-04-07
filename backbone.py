@@ -202,7 +202,7 @@ class SimpleBlock(nn.Module):
 # Bottleneck block
 class BottleneckBlock(nn.Module):
     maml = False #Default
-    def __init__(self, indim, outdim, half_res):
+    def __init__(self, indim, outdim, half_res, need_relu=True):
         super(BottleneckBlock, self).__init__()
         bottleneckdim = int(outdim/4)
         self.indim = indim
@@ -274,10 +274,11 @@ class ConvNet(nn.Module):
             trunk.append(Flatten())
 
         self.trunk = nn.Sequential(*trunk)
-        self.final_feat_dim = 1600
+        self.final_feat_dim = 256
 
     def forward(self,x):
         out = self.trunk(x)
+        # print(out.shape, "conv")
         return out
 
 class ConvNetNopool(nn.Module): #Relation net use a 4 layer conv with pooling in only first two layers, else no pooling
@@ -338,7 +339,7 @@ class ConvNetSNopool(nn.Module): #Relation net use a 4 layer conv with pooling i
 
 class ResNet(nn.Module):
     maml = False #Default
-    def __init__(self,block,list_of_num_layers, list_of_out_dims, flatten = True, del_last_relu=False):
+    def __init__(self,block,list_of_num_layers, list_of_out_dims, flatten = True, del_last_relu=False, add_final_layer=False):
         # list_of_num_layers specifies number of layers in each stage
         # list_of_out_dims specifies number of output channel for each stage
         super(ResNet,self).__init__()
@@ -376,19 +377,34 @@ class ResNet(nn.Module):
                 indim = list_of_out_dims[i]
 
 
+        self.trunk = nn.Sequential(*trunk)
         if flatten:
-            avgpool = nn.AvgPool2d(7)
-            trunk.append(avgpool)
-            trunk.append(Flatten())
+            self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+            self.flatten = Flatten()
+            # trunk.append(avgpool)
+            # trunk.append(Flatten())
             self.final_feat_dim = indim
         else:
             self.final_feat_dim = [ indim, 7, 7]
 
-        self.trunk = nn.Sequential(*trunk)
+        self.add_final_layer = add_final_layer
+        if self.add_final_layer:
+            final_feat_dim = int(np.prod(self.final_feat_dim))
+            self.final_layer = nn.Linear(final_feat_dim, out_features=list_of_out_dims[-1])
+            self.bn_final_layer = nn.BatchNorm1d(list_of_out_dims[-1])
+
 
     def forward(self,x):
-        out = self.trunk(x)
-        return out
+        h = self.trunk(x)
+
+        h = self.avgpool(h)
+        h = self.flatten(h)
+
+        if self.add_final_layer:
+            h = self.final_layer(h)
+            h = self.bn_final_layer(h)
+
+        return h
 
 
 class BasicBlockTapNet(nn.Module):
@@ -455,7 +471,7 @@ class BasicBlockTapNet(nn.Module):
 
 class ResNetTapNet(nn.Module):
 
-    def __init__(self, output_dim, del_last_relu=False):
+    def __init__(self, output_dim, del_last_relu=False, add_final_layer=False):
         super(ResNetTapNet, self).__init__()
         self.layer1 = BasicBlockTapNet(
             inplanes=3,
@@ -486,6 +502,12 @@ class ResNetTapNet(nn.Module):
 
         self.avg_pool = nn.AdaptiveAvgPool2d(output_size=(1,1))
 
+        self.add_final_layer = add_final_layer
+        if add_final_layer:
+            # self.bn_before_final_layer = 
+            self.final_layer = nn.Linear(output_dim, out_features=output_dim)
+            self.bn_final_layer = nn.BatchNorm1d(output_dim)
+
     def forward(self, x):
         h = self.layer1(x)
         h = self.layer2(h)
@@ -498,21 +520,26 @@ class ResNetTapNet(nn.Module):
         B, D, _, _ = h.shape
         h = h.reshape(B, D)
 
+        if self.add_final_layer:
+            h = self.final_layer(h)
+            h = self.bn_final_layer(h)
+            # sdfa
+
         return h
 
-def Conv4():
+def Conv4(del_last_relu=False, add_final_layer=False, output_dim=512):
     return ConvNet(4)
 
-def Conv6():
+def Conv6(del_last_relu=False, add_final_layer=False, output_dim=512):
     return ConvNet(6)
 
-def Conv4NP():
+def Conv4NP(del_last_relu=False, add_final_layer=False, output_dim=512):
     return ConvNetNopool(4)
 
-def Conv6NP():
+def Conv6NP(del_last_relu=False, add_final_layer=False, output_dim=512):
     return ConvNetNopool(6)
 
-def Conv4S():
+def Conv4S(del_last_relu=False, add_final_layer=False, output_dim=512):
     return ConvNetS(4)
 
 def Conv4SNP():
@@ -521,17 +548,17 @@ def Conv4SNP():
 def ResNet10( flatten = True, del_last_relu=False):
     return ResNet(SimpleBlock, [1,1,1,1],[64,128,256,512], flatten, del_last_relu=del_last_relu)
 
-def ResNet12(flatten=True, del_last_relu=False, output_dim=512):
-    return ResNetTapNet(output_dim=output_dim, del_last_relu=del_last_relu)
+def ResNet12(flatten=True, del_last_relu=False, add_final_layer=False, output_dim=512):
+    return ResNetTapNet(output_dim=output_dim, del_last_relu=del_last_relu, add_final_layer=add_final_layer)
 
-def ResNet18( flatten = True, del_last_relu=False, output_dim=512):
-    return ResNet(SimpleBlock, [2,2,2,2],[64,128,256,output_dim], flatten, del_last_relu=del_last_relu)
+def ResNet18( flatten = True, del_last_relu=False, output_dim=512, add_final_layer=False):
+    return ResNet(SimpleBlock, [2,2,2,2],[64,128,256,output_dim], flatten, del_last_relu=del_last_relu, add_final_layer=add_final_layer)
 
-def ResNet34( flatten = True):
-    return ResNet(SimpleBlock, [3,4,6,3],[64,128,256,512], flatten)
+def ResNet34( flatten = True, del_last_relu=False, output_dim=512):
+    return ResNet(SimpleBlock, [3,4,6,3],[64,128,256,output_dim], flatten)
 
-def ResNet50( flatten = True):
-    return ResNet(BottleneckBlock, [3,4,6,3], [256,512,1024,2048], flatten)
+def ResNet50( flatten = True, del_last_relu=False, output_dim=2048):
+    return ResNet(BottleneckBlock, [3,4,6,3], [256,512,1024,output_dim], flatten, del_last_relu=del_last_relu)
 
 def ResNet101( flatten = True):
     return ResNet(BottleneckBlock, [3,4,23,3],[256,512,1024,2048], flatten)

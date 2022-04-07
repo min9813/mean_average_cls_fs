@@ -1,5 +1,6 @@
 # This code is modified from https://github.com/jakesnell/prototypical-networks
 
+from methods import meta_test_preprocess
 import backbone
 import torch
 import torch.nn as nn
@@ -10,13 +11,14 @@ from methods.meta_template import MetaTemplate
 
 
 class ProtoNet(MetaTemplate):
-    def __init__(self, model_func, debug, n_way, n_support, output_dim, del_last_relu, normalize_method="no", norm_factor=1., normalize_vector="no", normalize_query=True, subtract_mean=False):
+    def __init__(self, model_func, debug, n_way, n_support, output_dim, del_last_relu, add_final_layer=False, normalize_method="no", norm_factor=1., normalize_vector="no", normalize_query=True, subtract_mean=False):
         super(ProtoNet, self).__init__(model_func,  n_way,
                                        n_support, normalize_method=normalize_method,
                                        normalize_vector=normalize_vector,
                                        subtract_mean=subtract_mean,
                                        output_dim=output_dim,
                                        del_last_relu=del_last_relu,
+                                       add_final_layer=add_final_layer,
                                        normalize_query=normalize_query)
         self.loss_fn = nn.CrossEntropyLoss()
 
@@ -39,11 +41,102 @@ class ProtoNet(MetaTemplate):
 
         z_proto = z_support.mean(1)
 
-        if self.normalize_method == "l2":
+        if "l2" in self.normalize_method and "after" not in self.normalize_method and "force" not in self.normalize_method:
+        # if self.normalize_method == "l2":
             if self.normalize_vector in ("mean", "before_and_mean"):
                 z_proto = z_proto / \
                     torch.sqrt(torch.sum(z_proto*z_proto, dim=1, keepdim=True))
                 z_proto = z_proto * self.norm_factor
+                # sdfa
+
+        elif "z_score" in self.normalize_method and "after" not in self.normalize_method and "force" not in self.normalize_method:
+        # if self.normalize_method == "l2":
+            if self.normalize_vector in ("mean", "before_and_mean"):
+                mean_values = torch.mean(z_proto, dim=1, keepdim=True)
+                std_values = torch.std(z_proto, dim=1, unbiased=False, keepdim=True)
+
+                z_proto = (z_proto - mean_values) / std_values
+
+        if self.normalize_method == "support_to_mean_of_norm":
+            # print(z_support.shape)
+            z_support_norm = torch.sqrt(torch.sum(z_support * z_support, dim=2))
+            # z_class_mean_norm = torch.mean(z_support_norm, dim=1, keepdim=True)
+
+            z_proto_norm = torch.sqrt(torch.sum(z_proto*z_proto, dim=1, keepdim=True))
+            # z_proto = z_proto * z_class_mean_norm / z_proto_norm
+            z_support = z_support / z_support_norm[:, :, None] * z_proto_norm[:, :, None]
+            z_proto = z_support.mean(1)
+
+        elif "est_test" in self.normalize_method:
+            w, pick_v, z_support, z_query = meta_test_preprocess.est_test(
+                support_features=z_support,
+                query_features=z_query,
+                pick_dim=60
+            )
+
+            z_proto = z_support.mean(1)
+
+        elif "lda_test" in self.normalize_method:
+            logit, z_support, z_query = meta_test_preprocess.lda_test(
+                support_features=z_support,
+                query_features=z_query
+            )
+            # print(logit.shape)
+            # sdfa
+            # print(z_support.shape)
+
+            z_proto = z_support.mean(1)
+
+        if "after_l2" in self.normalize_method:
+            if self.normalize_vector in ("mean", "before_and_mean"):
+                z_proto = z_proto / \
+                    torch.sqrt(torch.sum(z_proto*z_proto, dim=1, keepdim=True))
+                z_proto = z_proto * self.norm_factor
+
+        elif "after_z_score" in self.normalize_method:
+        # if self.normalize_method == "l2":
+            if self.normalize_vector in ("mean", "before_and_mean"):
+                mean_values = torch.mean(z_proto, dim=1, keepdim=True)
+                std_values = torch.std(z_proto, dim=1, unbiased=False, keepdim=True)
+
+                z_proto = (z_proto - mean_values) / std_values
+            # return logit
+            # print(z_support.shape, z_query.shape)
+            # z_pro
+
+        # elif self.normalize_method == "variance_of_norm":
+            # z_support_norm = torch.sqrt(torch.sum(z_support * z_support, dim=2))
+
+
+            # mean_of_proto_norm = torch.mean(z_proto_norm)
+            # z_query_norm = torch.sqrt(torch.sum(z_query*z_query, dim=2, keepdim=True))
+
+            # print(mean_of_proto_norm)
+            # print(z_query_norm)
+            # print(z_proto_norm)
+            # print(z_class_mean_norm)
+            # print(z_support_norm)
+            # dsfa
+
+            # z_query = z_query / z_query_norm * mean_of_proto_norm
+            # z_query_norm = torch.sqrt(torch.sum(z_query*z_query, dim=2, keepdim=True))
+            # print(z_query_norm)
+            # sfda
+        # z_proto = torch.cat((z_proto[:, None, :], z_support), dim=1)
+
+        # elif self.normalize_method == "minimize_variance_of_norm_by_trace":
+        #     z_support, z_query, z_proto = meta_test_preprocess.minimize_variance_of_norm_by_trace_torch(
+        #         z_support=z_support,
+        #         z_query=z_query
+        #     )
+            # z_proto_norm = torch.sqrt(torch.sum(z_proto*z_proto, dim=1, keepdim=True))
+
+        # z_proto = z_support
+            # print(z_query_norm)
+            # print(z_proto_norm)
+            # sdfa
+
+
 
         # query_norm  = torch.sqrt(torch.sum(z_query*z_query, dim=2, keepdim=True))
         # support_norm  = torch.sqrt(torch.sum(z_support*z_support, dim=2, keepdim=True))
@@ -62,21 +155,52 @@ class ProtoNet(MetaTemplate):
         # print(torch.sum(z_query*z_query, dim=1))
         # sfda
         if "maha" in self.normalize_method:
-            if "diag_cov" in self.normalize_method:
+            if "diag_cov_all" in self.normalize_method:
+                # z_var_all = torch.
                 D = z_support.shape[2]
-                z_var = torch.var(z_support, unbiased=False, dim=1)
+                z_support_one_array = z_support.reshape(-1, D)
+                z_data = torch.cat((z_query, z_support_one_array), dim=0)
+                z_var = torch.std(z_data, unbiased=False, dim=0, keepdim=True)
 
-                z_var_all = torch.var(
-                    z_support.reshape(-1, D), dim=0, keepdim=True)
-                z_var_all = z_var_all.expand(len(z_var), z_var_all.shape[1])
+                z_var = z_var.expand(self.n_way, D)
+                # z_var_class = torch.var(z_support, unbiased=False, dim=1)
+
+                # mask = torch.abs(z_var_class) < 1e-8
+                # z_var_class[mask] = z_var[mask]
+                # z_var_all = torch.var(
+                #     z_support.reshape(-1, D), dim=0, keepdim=True)
+                # z_var_all = z_var_all.expand(len(z_var), z_var_all.shape[1])
                 # # # cov
-                mask = torch.abs(z_var) < 1e-8
-                z_var[mask] = z_var_all[mask]
+                # mask = torch.abs(z_var) < 1e-8
+                # z_var[mask] = z_var_all[mask]
                 dists = calc_mahalanobis_torch(
                     feature1=z_query,
                     feature2=z_proto,
                     sigma=z_var
                 )
+
+            elif "diag_cov" in self.normalize_method:
+                D = z_support.shape[2]
+                z_var = torch.std(z_support, unbiased=False, dim=1)
+
+                z_var_all = torch.std(
+                    z_support.reshape(-1, D), dim=0, keepdim=True)
+                z_var_all = z_var_all.expand(len(z_var), z_var_all.shape[1])
+                # # # cov
+                mask = torch.abs(z_var) < 1e-8
+                z_var[mask] = z_var_all[mask]
+                mean_var = torch.mean(z_var)
+
+                mask = torch.abs(z_var) < 1e-8
+                z_var[mask] = mean_var
+
+
+                dists = calc_mahalanobis_torch(
+                    feature1=z_query,
+                    feature2=z_proto,
+                    sigma=z_var
+                )
+
             else:
                 class_cov_list = []
                 for i in range(self.n_way):
@@ -93,7 +217,21 @@ class ProtoNet(MetaTemplate):
                 )
 
         else:
+            if len(z_proto.shape) == 3:
+                is_proto_knn = True
+                n_prototype = z_proto.shape[1]
+                z_proto = z_proto.reshape(self.n_way * n_prototype, -1)
+            # else:
+                # is_proto_knn = False
+
             dists = euclidean_dist(z_query, z_proto)
+
+            # if is_proto_knn:
+                # dists = 
+
+
+        # print(dists.shape)
+        # sfda
 
         scores = -dists
         return scores

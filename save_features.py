@@ -55,6 +55,10 @@ if __name__ == '__main__':
     else:
         image_size = 84
 
+
+    if params.dataset in ["cifarfs", "fc100"]:
+        image_size = 32
+
     if params.dataset in ['omniglot', 'cross_char']:
         assert params.model == 'Conv4' and not params.train_aug, 'omniglot only support Conv4 without augmentation'
         params.model = 'Conv4S'
@@ -71,7 +75,11 @@ if __name__ == '__main__':
         else:
             loadfile = configs.data_dir['emnist'] + split + '.json'
     else:
-        loadfile = configs.data_dir[params.dataset] + split + '.json'
+        if params.dataset == "fc100":
+            loadfile = configs.data_dir[params.dataset] + f'FC100_test.pickle'
+
+        else:
+            loadfile = configs.data_dir[params.dataset] + 'CIFAR_FS_test.pickle'
 
     # params.checkpoint_dir = '%s/checkpoints/%s/%s_%s_%s_%s' % (
         # configs.save_dir, params.dataset, params.model, del_relu_name, params.method, str(params.output_dim))
@@ -87,6 +95,13 @@ if __name__ == '__main__':
 
     params.checkpoint_dir = '%s/checkpoints/%s/%s_%s_%s_%s' % (
         configs.save_dir, params.dataset, params.model, del_relu_name, params.method, str(params.output_dim))
+
+    if params.add_final_layer:
+        final_layer_name = "-add_final_layer"
+
+    else:
+        final_layer_name = ""
+    params.checkpoint_dir += final_layer_name
 
     checkpoint_dir = params.checkpoint_dir
 
@@ -142,17 +157,22 @@ if __name__ == '__main__':
     elif params.method in ['maml', 'maml_approx']:
         raise ValueError('MAML do not support save feature')
     else:
-        model = model_dict[params.model](del_last_relu=params.del_last_relu, output_dim=params.output_dim)
+        model = model_dict[params.model](del_last_relu=params.del_last_relu, output_dim=params.output_dim, add_final_layer=params.add_final_layer)
 
     if params.del_last_relu:
         outfile = outfile.replace(".hdf5", "_del_last_relu.hdf5")
 
+    if params.add_final_layer:
+        outfile = outfile.replace(".hdf5", "-add_final_layer.hdf5")
+        
     outfile = outfile.replace(".hdf5", "_{}.hdf5".format(file_stem))
     print("save to:", outfile)
     # if p
 
     model = model.cuda()
     tmp = torch.load(modelfile)
+    # print(tmp["acc"], tmp["epoch"])
+    # sdfa
     state = tmp['state']
     state_keys = list(state.keys())
     for i, key in enumerate(state_keys):

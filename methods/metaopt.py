@@ -1,48 +1,43 @@
-import os
+from cProfile import label
+from methods import meta_test_preprocess
 import backbone
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import numpy as np
 import torch.nn.functional as F
-import utils
-import cv2
-from abc import abstractmethod
+from methods.meta_template import MetaTemplate
 from tqdm import tqdm
+from metaopt_models import classification_heads
 
 
-class MetaTemplate(nn.Module):
-    def __init__(self, model_func, n_way, n_support, change_way=True, subtract_mean=False, add_final_layer=False, normalize_method="no", normalize_vector="no", normalize_query=True, del_last_relu=False, output_dim=512):
-        super(MetaTemplate, self).__init__()
+class MetaOpt(nn.Module):
+
+    def __init__(self, model_func, n_way, n_support, subtract_mean=False, add_final_layer=False, normalize_method="no", normalize_vector="no", normalize_query=True, del_last_relu=False, output_dim=512, debug=False):
+        super(MetaOpt, self).__init__()
         self.n_way = n_way
         self.n_support = n_support
         self.n_query = -1  # (change depends on input)
         self.feature = model_func(
             del_last_relu=del_last_relu, output_dim=output_dim, add_final_layer=add_final_layer)
-        self.feat_dim = self.feature.final_feat_dim
-        # some methods allow different_way classification during training and test
-        self.change_way = change_way
+
+        self.feature = self.feature.cuda()
+
+        self.cls_head = classification_heads.ClassificationHead(
+            base_learner="SVM-CS"
+        )
+        self.cls_head = self.cls_head.cuda()
+        self.debug = debug
         self.support_aug_num = 1
 
-        # assert normalize_method in ("no", "l2", "maha", "maha-diag_cov", "support_to_mean_of_norm", "minimize_variance_of_norm_by_trace")
-        assert normalize_vector in ("before", "mean", "before_and_mean", "no")
+        self.cls_loss = nn.CrossEntropyLoss()
 
-        self.normalize_method = normalize_method
-        self.normalize_vector = normalize_vector
-        self.normalize_query = normalize_query
-        self.subtract_mean = subtract_mean
-
-    @abstractmethod
-    def set_forward(self, x, is_feature, normalize_feature=False):
-        pass
-
-    @abstractmethod
-    def set_forward_loss(self, x):
-        pass
 
     def forward(self, x):
-        out = self.feature.forward(x)
-        return out
+        x = x.cuda()
+
+        features = self.feature(x)
+        return features
 
     def parse_feature(self, x, is_feature, is_cuda=True, is_detach=False, normalize_feature=False):
         if is_cuda:
@@ -74,41 +69,27 @@ class MetaTemplate(nn.Module):
         z_support = z_all[:, :self.n_support*self.support_aug_num]
         z_query = z_all[:, self.n_support*self.support_aug_num:]
 
-        if "l2" in self.normalize_method:
-            if self.normalize_query:
-                z_query = z_query / \
-                    torch.sqrt(
-                        torch.sum(z_query * z_query, dim=2, keepdim=True))
-
-            if self.normalize_vector in ("before_and_mean", "before"):
-                z_support = z_support / \
-                    torch.sqrt(
-                        torch.sum(z_support * z_support, dim=2, keepdim=True))
-
-            # z_support = z_support * self.norm_factor
-        elif "z_score" in self.normalize_method:
-            if self.normalize_query:
-                mean_values = torch.mean(z_query, dim=2, keepdim=True)
-                std_values = torch.std(z_query, dim=2, unbiased=False, keepdim=True)
-
-                z_query = (z_query - mean_values) / std_values
-
-            if self.normalize_vector in ("before_and_mean", "before"):
-                mean_values = torch.mean(z_support, dim=2, keepdim=True)
-                std_values = torch.std(z_support, dim=2, unbiased=False, keepdim=True)
-
-                z_support = (z_support - mean_values) / std_values
-
-
-        # print("z_query before shape:", z_query.shape)
-        if self.support_aug_num > 1:
-            z_query = z_query[:, ::self.support_aug_num]
-
-        # print("z_query shape:", z_query.shape)
-        # print("z_support shape:", z_support.shape)
-
         return z_support, z_query
 
+    def set_forward(self, x, is_feature, is_cuda=True):
+        z_support, z_query = self.parse_feature(x, is_feature=is_feature)
+
+        # label_for_support = torch.from_numpy(np.repeat(range(self.n_way), self.n_support).reshape(self.n_way, self.n_support))
+        label_for_support = torch.from_numpy(np.repeat(range(self.n_way), self.n_support)).reshape(1, -1)
+        label_for_support = label_for_support.cuda()
+
+        n_way, n_query = z_query.shape[:2]
+
+        z_support = z_support.reshape(1, self.n_way*self.n_support*self.support_aug_num, -1)
+        z_query = z_query.reshape(1, self.n_way*n_query*self.support_aug_num, -1)
+        # label_for_query = torch.from_numpy(np.repeat(range(self.n_way), self.n_support).reshape(self.n_way, self.n_support))
+        # label_for_query = label_for_query.cuda()
+
+        scores = self.cls_head(query=z_query, support=z_support, support_labels=label_for_support, n_way=self.n_way, n_shot=self.n_support)
+
+        return scores
+
+        
     def correct(self, x):
         scores = self.set_forward(x, is_feature=len(x.shape) < 4, is_cuda=True)
         if scores.shape[1] > self.n_way:
@@ -124,6 +105,18 @@ class MetaTemplate(nn.Module):
         top1_correct = np.sum(topk_ind[:, 0] == y_query)
         return float(top1_correct), len(y_query)
 
+    def set_forward_loss(self, x):
+        scores = self.set_forward(x, is_feature=len(x.shape) < 4, is_cuda=True)
+        # if scores.shape[1] > self.n_way:
+        n_query = scores.shape[1] // self.n_way
+        y_query = torch.arange(self.n_way, dtype=torch.long, device=scores.device).reshape(self.n_way,1).repeat(1, n_query)
+        y_query = y_query.reshape(-1)
+        # print(scores.shape, y_query.shape)
+        scores = scores.reshape(-1, self.n_way)
+
+        loss = self.cls_loss(scores, y_query)
+        return loss
+
     def train_loop(self, epoch, train_loader, optimizer, trn_logger=None, params=None):
         print_freq = 10
 
@@ -136,8 +129,7 @@ class MetaTemplate(nn.Module):
         avg_loss = 0
         for i, (x, _) in enumerate(train_loader):
             self.n_query = x.size(1) - self.n_support
-            if self.change_way:
-                self.n_way = x.size(0)
+            self.n_way = x.size(0)
             optimizer.zero_grad()
             loss = self.set_forward_loss(x)
             loss.backward()
@@ -146,8 +138,11 @@ class MetaTemplate(nn.Module):
 
             if i % print_freq == 0:
                 # print(optimizer.state_dict()['param_groups'][0]['lr'])
-                print_('Epoch {:d} | Batch {:d}/{:d} | Loss {:f}'.format(epoch,
-                                                                         i, len(train_loader), avg_loss/float(i+1)))
+                print_('Epoch {:d} | Batch {:d}/{:d} | Loss {:f}'.format(
+                    epoch,
+                    i,
+                    len(train_loader),
+                    avg_loss/float(i+1)))
 
             if self.debug and i >= 5:
                 break
@@ -219,42 +214,3 @@ class MetaTemplate(nn.Module):
               (iter_num,  acc_mean, 1.96 * acc_std/np.sqrt(iter_num)))
 
         return acc_all, acc_mean, acc_std
-
-    # further adaptation, default is fixing feature and train a new softmax clasifier
-    def set_forward_adaptation(self, x, is_feature=True):
-        assert is_feature == True, 'Feature is fixed in further adaptation'
-        z_support, z_query = self.parse_feature(x, is_feature)
-
-        z_support = z_support.contiguous().view(self.n_way * self.n_support, -1)
-        z_query = z_query.contiguous().view(self.n_way * self.n_query, -1)
-
-        y_support = torch.from_numpy(
-            np.repeat(range(self.n_way), self.n_support))
-        y_support = Variable(y_support.cuda())
-
-        linear_clf = nn.Linear(self.feat_dim, self.n_way)
-        linear_clf = linear_clf.cuda()
-
-        set_optimizer = torch.optim.SGD(linear_clf.parameters(
-        ), lr=0.01, momentum=0.9, dampening=0.9, weight_decay=0.001)
-
-        loss_function = nn.CrossEntropyLoss()
-        loss_function = loss_function.cuda()
-
-        batch_size = 4
-        support_size = self.n_way * self.n_support
-        for epoch in range(100):
-            rand_id = np.random.permutation(support_size)
-            for i in range(0, support_size, batch_size):
-                set_optimizer.zero_grad()
-                selected_id = torch.from_numpy(
-                    rand_id[i: min(i+batch_size, support_size)]).cuda()
-                z_batch = z_support[selected_id]
-                y_batch = y_support[selected_id]
-                scores = linear_clf(z_batch)
-                loss = loss_function(scores, y_batch)
-                loss.backward()
-                set_optimizer.step()
-
-        scores = linear_clf(z_query)
-        return scores
